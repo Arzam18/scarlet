@@ -225,17 +225,15 @@ unsafe fn output_sum_dotprod(
             let ntm_low = vcombine_u8(ntm_low_0, ntm_low_1);
             let ntm_high = vcombine_u8(ntm_high_0, ntm_high_1);
 
-            let stm_w16 = vld1q_s16(w.as_ptr().add(i));
-            let ntm_w16 = vld1q_s16(w.as_ptr().add(HIDDEN + i));
-            // The runtime check proves that these non-saturating narrows are exact.
-            let stm_w8 = vcombine_s8(
-                vmovn_s16(vget_low_s16(stm_w16)),
-                vmovn_s16(vget_high_s16(stm_w16)),
-            );
-            let ntm_w8 = vcombine_s8(
-                vmovn_s16(vget_low_s16(ntm_w16)),
-                vmovn_s16(vget_high_s16(ntm_w16)),
-            );
+            // Each SDOT call consumes 16 signed-byte weights. Load two
+            // 8-lane i16 vectors, then narrow each to 8 lanes and combine.
+            // The runtime range check proves these non-saturating narrows exact.
+            let stm_w16_0 = vld1q_s16(w.as_ptr().add(i));
+            let stm_w16_1 = vld1q_s16(w.as_ptr().add(i + 8));
+            let ntm_w16_0 = vld1q_s16(w.as_ptr().add(HIDDEN + i));
+            let ntm_w16_1 = vld1q_s16(w.as_ptr().add(HIDDEN + i + 8));
+            let stm_w8 = vcombine_s8(vmovn_s16(stm_w16_0), vmovn_s16(stm_w16_1));
+            let ntm_w8 = vcombine_s8(vmovn_s16(ntm_w16_0), vmovn_s16(ntm_w16_1));
 
             // XOR with 0x80 maps unsigned byte x to signed (x - 128).
             // Since x² = lo + 256*hi, the exact offset correction is
