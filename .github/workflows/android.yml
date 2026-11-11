@@ -1,0 +1,56 @@
+name: Build Scarlet Android ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-arm64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust and Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK r27c
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fL --retry 3 --retry-all-errors \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip \
+            -o android-ndk-r27c-linux.zip
+          echo "090e8083a715fdb1a3e402d0763c388abb03fb4e  android-ndk-r27c-linux.zip" | sha1sum -c -
+          mkdir -p "$RUNNER_TEMP/android-ndk"
+          unzip -q android-ndk-r27c-linux.zip -d "$RUNNER_TEMP/android-ndk"
+          echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk/android-ndk-r27c" >> "$GITHUB_ENV"
+
+      - name: Host regression tests
+        run: cargo test --locked --release --lib
+
+      - name: Host UCI smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bin scarlet
+          printf 'uci\nisready\nquit\n' | target/release/scarlet > "$RUNNER_TEMP/scarlet-uci.txt"
+          grep -q '^uciok$' "$RUNNER_TEMP/scarlet-uci.txt"
+          grep -q '^readyok$' "$RUNNER_TEMP/scarlet-uci.txt"
+          echo 'PASS: host UCI handshake'
+
+      - name: Build Android ARM64 NEON engine
+        run: bash scripts/build-android-arm64.sh
+
+      - name: Upload engine-only artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scarlet-Android-ARM64-NEON-SDOT-RuntimeDispatch
+          path: dist/scarlet-android-arm64
+          if-no-files-found: error
+          retention-days: 30
