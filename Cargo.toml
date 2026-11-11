@@ -2,6 +2,7 @@
 name = "scarlet"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
 
 [profile.release]
 opt-level = 3
@@ -20,6 +21,20 @@ opt-level = 3
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+training = ["dep:bullet"]
+
+[[bin]]
+name = "gen_data"
+path = "src/bin/gen_data.rs"
+required-features = ["training"]
+
+[[bin]]
+name = "train_net"
+path = "src/bin/train_net.rs"
+required-features = ["training"]
+
 [dependencies]
 bitintr = "0.3.0"
 fxhash = "0.2.1"
@@ -28,7 +43,7 @@ partial_sort = "0.2.0"
 smallvec = "1.11.2"
 strum = "0.25.0"
 strum_macros = "0.25.3"
-bullet = { git = "https://github.com/jw1912/bullet", package = "bullet_lib", features = ["cuda"] }
+bullet = { git = "https://github.com/jw1912/bullet", package = "bullet_lib", features = ["cuda"], optional = true }
 rand = "0.9.5"
 tokio = {version = "1.53.1", features = ["full"] }
 tune_macro = { version = "0.1.0", path = "tune_macro" }

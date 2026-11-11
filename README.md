@@ -38,3 +38,17 @@ Scarlet v2 is rated 3381 CCRL blitz (#148) as of October 17th, 2026.
 Find and download the binary from releases most fitting your system, then run that executable. <br>
 Alternatively, you can build the project yourself. Ensure both rust and cargo are installed, enter the main directory of the project, and run
 `cargo build --bin scarlet --release`.  After this, the executable for the chess engine will be in target/release. 
+
+## Android ARM64 build
+
+The repository includes a GitHub Actions workflow (`Build Scarlet Android ARM64`) and a local build script:
+
+```bash
+bash scripts/build-android-arm64.sh
+```
+
+Set `ANDROID_NDK_HOME` to a Linux Android NDK installation. The script targets `aarch64-linux-android` (API 24), keeps the baseline binary on generic ARM64 + NEON, compiles the AArch64 test configuration, and checks the final ELF/disassembly. It emits only `dist/scarlet-android-arm64`.
+
+The sliding-attack PEXT/PDEP operations retain BMI2 assembly on x86-64 and use an exact portable bit-extraction/deposition fallback on AArch64. NNUE accumulator updates and the non-Dotprod output evaluator use NEON. The bundled network's output-layer weights are signed-byte representable; an exact SDOT output-layer kernel is compiled separately and used only when runtime CPU detection reports Dotprod and the network weight-range check passes. Other networks/CPUs fall back to NEON. The feature-weight layer remains 16-bit and does not use SDOT.
+
+The training/data-generation binaries and CUDA-backed `bullet` dependency are opt-in through `--features training`; the Android engine build does not enable that feature.
