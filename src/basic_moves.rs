@@ -1,7 +1,60 @@
 pub use crate::board;
 pub use crate::board::*;
 pub use crate::moves;
-use std::arch::asm;
+
+// BMI2-compatible bit extraction/deposition. ARMv8 lacks PEXT/PDEP; the
+// AArch64 implementation below is an exact portable fallback. x86-64 retains
+// the original BMI2 instructions.
+#[cfg(target_arch = "x86_64")]
+use core::arch::asm;
+
+#[cfg(any(not(target_arch = "x86_64"), test))]
+#[inline(always)]
+fn pext_u64_portable(value: u64, mask: u64) -> u64 {
+    let mut remaining=mask; let mut source_bit=1u64; let mut result=0u64;
+    while remaining!=0 {
+        let lowest=remaining & remaining.wrapping_neg();
+        if value & lowest != 0 { result |= source_bit; }
+        remaining &= remaining-1; source_bit=source_bit.wrapping_shl(1);
+    }
+    result
+}
+
+#[cfg(any(not(target_arch = "x86_64"), test))]
+#[inline(always)]
+fn pdep_u64_portable(value: u64, mask: u64) -> u64 {
+    let mut remaining=mask; let mut source_bit=1u64; let mut result=0u64;
+    while remaining!=0 {
+        let lowest=remaining & remaining.wrapping_neg();
+        if value & source_bit != 0 { result |= lowest; }
+        remaining &= remaining-1; source_bit=source_bit.wrapping_shl(1);
+    }
+    result
+}
+
+#[inline(always)]
+fn pext_u64(value:u64,mask:u64)->u64 {
+    #[cfg(target_arch="x86_64")]
+    { let result:u64; unsafe { asm!("pext {out}, {value}, {mask}", out=out(reg) result, value=in(reg) value, mask=in(reg) mask, options(nomem,nostack,preserves_flags)); } result }
+    #[cfg(not(target_arch="x86_64"))]
+    { pext_u64_portable(value,mask) }
+}
+
+#[inline(always)]
+fn pdep_u64(value:u64,mask:u64)->u64 {
+    #[cfg(target_arch="x86_64")]
+    { let result:u64; unsafe { asm!("pdep {out}, {value}, {mask}", out=out(reg) result, value=in(reg) value, mask=in(reg) mask, options(nomem,nostack,preserves_flags)); } result }
+    #[cfg(not(target_arch="x86_64"))]
+    { pdep_u64_portable(value,mask) }
+}
+
+#[inline(always)] fn blsmsk_u64(value:u64)->u64 { value ^ value.wrapping_sub(1) }
+#[inline(always)] fn pext_blsmsk_pdep(value:u64,mask:u64)->u64 { pdep_u64(blsmsk_u64(pext_u64(value,mask)),mask) }
+#[inline(always)] fn pext_drop_low_blsmsk_pdep(value:u64,mask:u64)->u64 {
+    let packed=pext_u64(value,mask);
+    pdep_u64(blsmsk_u64(packed & packed.wrapping_sub(1)),mask)
+}
+
 
 // Lookup tables
 const NMOVES: [u64; 64] = [
@@ -1143,23 +1196,19 @@ impl Board {
 
         let mut right: u64 = main_bb;
         // Bitintr pext is slow
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pext_u64(right, RMOVES_RIGHT[from]);
         right = rev_blsmsk_rev(right);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pdep_u64(right, RMOVES_RIGHT[from]);
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pext_u64(down, RMOVES_DOWN[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pdep_u64(down, RMOVES_DOWN[from]);
 
         let mut left: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) RMOVES_LEFT[from])
-        }
+        left = pext_blsmsk_pdep(left, RMOVES_LEFT[from]);
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) RMOVES_UP[from])
-        }
+        up = pext_blsmsk_pdep(up, RMOVES_UP[from]);
 
         right | up | left | down
     }
@@ -1169,24 +1218,20 @@ impl Board {
             (self.get_bitboard(PieceType::WhitePieces) | self.get_bitboard(PieceType::BlackPieces)) ^ king;
 
         let mut right: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) BMOVES_UR[from])
-        }
+        right = pext_blsmsk_pdep(right, BMOVES_UR[from]);
 
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) BMOVES_UL[from])
-        }
+        up = pext_blsmsk_pdep(up, BMOVES_UL[from]);
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pext_u64(down, BMOVES_DR[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pdep_u64(down, BMOVES_DR[from]);
 
         let mut left: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pext_u64(left, BMOVES_DL[from]);
         left = rev_blsmsk_rev(left);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pdep_u64(left, BMOVES_DL[from]);
 
         right | up | left | down
     }
@@ -1233,23 +1278,19 @@ impl Board {
 
         let mut right: u64 = main_bb;
         // Bitintr pext is slow
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pext_u64(right, RMOVES_RIGHT[from]);
         right = rev_blsmsk_rev(right);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pdep_u64(right, RMOVES_RIGHT[from]);
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pext_u64(down, RMOVES_DOWN[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pdep_u64(down, RMOVES_DOWN[from]);
 
         let mut left: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) RMOVES_LEFT[from])
-        }
+        left = pext_blsmsk_pdep(left, RMOVES_LEFT[from]);
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) RMOVES_UP[from])
-        }
+        up = pext_blsmsk_pdep(up, RMOVES_UP[from]);
 
         (right | up | left | down) & self.open_squares()
     }
@@ -1257,24 +1298,20 @@ impl Board {
         let main_bb: u64 = self.get_bitboard(PieceType::WhitePieces) | self.get_bitboard(PieceType::BlackPieces);
 
         let mut right: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) BMOVES_UR[from])
-        }
+        right = pext_blsmsk_pdep(right, BMOVES_UR[from]);
 
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) BMOVES_UL[from])
-        }
+        up = pext_blsmsk_pdep(up, BMOVES_UL[from]);
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pext_u64(down, BMOVES_DR[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pdep_u64(down, BMOVES_DR[from]);
 
         let mut left: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pext_u64(left, BMOVES_DL[from]);
         left = rev_blsmsk_rev(left);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pdep_u64(left, BMOVES_DL[from]);
 
         (right | up | left | down) & self.open_squares()
     }
@@ -1295,17 +1332,15 @@ impl Board {
             | self.get_bitboard(PieceType::WhiteQueen.shiftedby(self.color().swapped()));
 
         let mut right: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pext_u64(right, RMOVES_RIGHT[from]);
         right = rev_blsmsk_rev(right);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pdep_u64(right, RMOVES_RIGHT[from]);
         if right & rooks != 0 {
             self.update_checkmask(right)
         }
 
         let mut left: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) RMOVES_LEFT[from])
-        }
+        left = pext_blsmsk_pdep(left, RMOVES_LEFT[from]);
         if left & rooks != 0 {
             self.update_checkmask(left)
         }
@@ -1324,34 +1359,27 @@ impl Board {
             | self.get_bitboard(PieceType::WhiteQueen.shiftedby(self.color().swapped()));
 
         let mut right: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pext_u64(right, RMOVES_RIGHT[from]);
         right = rev_blsr_blsmsk_rev(right);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pdep_u64(right, RMOVES_RIGHT[from]);
         if right & rooks == 0 {
             right = 0;
         }
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pext_u64(down, RMOVES_DOWN[from]);
         down = rev_blsr_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pdep_u64(down, RMOVES_DOWN[from]);
         if down & rooks == 0 {
             down = 0;
         }
-
-        let r: u64 = 0;
-
         let mut left: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "mov {c}, {a}", "sub {c}, 1","and {a}, {c}", "blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) RMOVES_LEFT[from],c =in(reg) r)
-        }
+        left = pext_drop_low_blsmsk_pdep(left, RMOVES_LEFT[from]);
         if left & rooks == 0 {
             left = 0;
         }
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "mov {c}, {a}", "sub {c}, 1","and {a}, {c}", "blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) RMOVES_UP[from], c=in(reg) r)
-        }
+        up = pext_drop_low_blsmsk_pdep(up, RMOVES_UP[from]);
         if up & rooks == 0 {
             up = 0;
         }
@@ -1363,37 +1391,30 @@ impl Board {
         let main_bb: u64 = self.get_bitboard(PieceType::WhitePieces) | self.get_bitboard(PieceType::BlackPieces);
         let bishops: u64 = self.get_bitboard(PieceType::WhiteBishop.shiftedby(self.color().swapped()))
             | self.get_bitboard(PieceType::WhiteQueen.shiftedby(self.color().swapped()));
-
-        let r: u64 = 0;
-
         let mut right: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "mov {c}, {a}", "sub {c}, 1", "and {a}, {c}", "blsmsk {a}, {a}", "pdep {a}, {a}, {b}", a = inout(reg) right, b = in(reg) BMOVES_UR[from], c = in(reg) r)
-        }
+        right = pext_drop_low_blsmsk_pdep(right, BMOVES_UR[from]);
         if right & bishops == 0 {
             right = 0;
         }
 
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "mov {c}, {a}", "sub {c}, 1", "and {a}, {c}", "blsmsk {a}, {a}", "pdep {a}, {a}, {b}", a = inout(reg) up, b = in(reg) BMOVES_UL[from], c = in(reg) r)
-        }
+        up = pext_drop_low_blsmsk_pdep(up, BMOVES_UL[from]);
         if up & bishops == 0 {
             up = 0;
         }
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pext_u64(down, BMOVES_DR[from]);
         down = rev_blsr_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pdep_u64(down, BMOVES_DR[from]);
         if down & bishops == 0 {
             down = 0;
         }
 
         let mut left: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pext_u64(left, BMOVES_DL[from]);
         left = rev_blsr_blsmsk_rev(left);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pdep_u64(left, BMOVES_DL[from]);
 
         if left & bishops == 0 {
             left = 0;
@@ -1414,65 +1435,57 @@ impl Board {
             | self.get_bitboard(PieceType::WhiteQueen.shiftedby(self.color().swapped()));
 
         let mut right: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pext_u64(right, RMOVES_RIGHT[from]);
         right = rev_blsmsk_rev(right);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) RMOVES_RIGHT[from]) }
+        right = pdep_u64(right, RMOVES_RIGHT[from]);
         if right & rooks != 0 {
             self.update_checkmask(right)
         }
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pext_u64(down, RMOVES_DOWN[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) RMOVES_DOWN[from]) }
+        down = pdep_u64(down, RMOVES_DOWN[from]);
         if down & rooks != 0 {
             self.update_checkmask(down)
         }
 
         let mut left: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) RMOVES_LEFT[from])
-        }
+        left = pext_blsmsk_pdep(left, RMOVES_LEFT[from]);
         if left & rooks != 0 {
             self.update_checkmask(left)
         }
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}", "blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) RMOVES_UP[from])
-        }
+        up = pext_blsmsk_pdep(up, RMOVES_UP[from]);
         if up & rooks != 0 {
             self.update_checkmask(up)
         }
 
         // Bishops
         let mut right: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) right,b = in(reg) BMOVES_UR[from])
-        }
+        right = pext_blsmsk_pdep(right, BMOVES_UR[from]);
         if right & bishops != 0 {
             self.update_checkmask(right)
         }
 
         let mut up: u64 = main_bb;
-        unsafe {
-            asm!("pext {a}, {a}, {b}","blsmsk {a}, {a}","pdep {a}, {a}, {b}",a = inout(reg) up,b = in(reg) BMOVES_UL[from])
-        }
+        up = pext_blsmsk_pdep(up, BMOVES_UL[from]);
         if up & bishops != 0 {
             self.update_checkmask(up)
         }
 
         let mut down: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pext_u64(down, BMOVES_DR[from]);
         down = rev_blsmsk_rev(down);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) down,b = in(reg) BMOVES_DR[from]) }
+        down = pdep_u64(down, BMOVES_DR[from]);
         if down & bishops != 0 {
             self.update_checkmask(down)
         }
 
         let mut left: u64 = main_bb;
-        unsafe { asm!("pext {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pext_u64(left, BMOVES_DL[from]);
         left = rev_blsmsk_rev(left);
-        unsafe { asm!("pdep {a}, {a}, {b}",a = inout(reg) left,b = in(reg) BMOVES_DL[from]) }
+        left = pdep_u64(left, BMOVES_DL[from]);
         if left & bishops != 0 {
             self.update_checkmask(left)
         }
@@ -1528,5 +1541,32 @@ impl Board {
         moves::bitloop!(kings{self.update_attacked(self.king_bbmoves_atk(kings.blsi().trailing_zeros() as usize));});
 
         self.switch_color();
+    }
+}
+
+
+#[cfg(test)]
+mod bmi2_fallback_tests {
+    use super::*;
+    fn next_random(s:&mut u64)->u64 { *s^=*s<<13; *s^=*s>>7; *s^=*s<<17; *s }
+    fn ref_pext(v:u64,m:u64)->u64 { let(mut r,mut d)=(0,0); for src in 0..64 { let b=1u64<<src; if m&b!=0 { if v&b!=0 {r|=1u64<<d;} d+=1; } } r }
+    fn ref_pdep(v:u64,m:u64)->u64 { let(mut r,mut src)=(0,0); for dst in 0..64 { let b=1u64<<dst; if m&b!=0 { if v&(1u64<<src)!=0 {r|=b;} src+=1; } } r }
+    #[test] fn portable_pext_pdep_are_bit_exact() {
+        let mut seed=0x9e37_79b9_7f4a_7c15;
+        for _ in 0..50_000 { let v=next_random(&mut seed); let m=next_random(&mut seed);
+            assert_eq!(pext_u64_portable(v,m),ref_pext(v,m));
+            assert_eq!(pdep_u64_portable(v,m),ref_pdep(v,m));
+            assert_eq!(pdep_u64_portable(pext_u64_portable(v,m),m),v&m);
+        }
+    }
+    #[test] fn selected_arch_backend_matches_portable_reference() {
+        #[cfg(target_arch="x86_64")] if !std::is_x86_feature_detected!("bmi2") { return; }
+        let mut seed=0xd1b5_4a32_d192_ed03;
+        for _ in 0..10_000 { let v=next_random(&mut seed); let m=next_random(&mut seed);
+            let p=ref_pext(v,m); let bls=p^p.wrapping_sub(1); let drop=p&p.wrapping_sub(1);
+            assert_eq!(pext_u64(v,m),p); assert_eq!(pdep_u64(v,m),ref_pdep(v,m));
+            assert_eq!(pext_blsmsk_pdep(v,m),ref_pdep(bls,m));
+            assert_eq!(pext_drop_low_blsmsk_pdep(v,m),ref_pdep(drop^drop.wrapping_sub(1),m));
+        }
     }
 }
